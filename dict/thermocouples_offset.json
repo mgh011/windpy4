@@ -1,0 +1,10 @@
+{
+    "_comment": "Intercomparison Thermocouples vs Rotronic MOMAA 9 (used as a reference value). Heights are h (unit [m]), and offsets are dT (unit [k]). dT = T_tc -T_momaa",
+    "sensors": {
+        "Temp_C(1)": {"h": 0.30, "dT": 2.49},
+        "Temp_C(2)": {"h": 0.05, "dT": 1.86},
+        "Temp_C(3)": {"h": 0.10, "dT": 1.24},
+        "Temp_C(5)": {"h": 0.40, "dT": -0.20},
+        "Temp_C(6)": {"h": 0.80, "dT": -0.65}
+    }
+}

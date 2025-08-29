@@ -1,0 +1,61 @@
+{
+  "su": {
+    "raw": {
+      "label": "$E_{uu}$",
+      "units": "[m$^2$/s$^2$]"
+    },
+    "norm": {
+      "label": "$f \\cdot E_{uu} / \\sigma_{uu}^2$",
+      "units": "",
+      "sigma": "uu"		
+    }	
+  },
+
+  "sv": {
+    "raw": {
+      "label": "$E_{vv}$",
+      "units": "[m$^2$/s$^2$]"
+    },
+    "norm": {
+      "label": "$f \\cdot E_{vv} / \\sigma_{vv}^2$",
+      "units": "",
+      "sigma": "vv"		
+    }	
+  },
+
+  "sw": {
+    "raw": {
+      "label": "$E_{ww}$",
+      "units": "[m$^2$/s$^2$]"
+    },
+    "norm": {
+      "label": "$f \\cdot E_{ww} / \\sigma_{ww}^2$",
+      "units": "",
+      "sigma": "ww"		
+    }	
+  },
+
+ "sT": {
+    "raw": {
+      "label": "$E_{tt}$",
+      "units": "[$K^2 Hz$]"
+    },
+    "norm": {
+      "label": "$f \\cdot E_{tt} / \\sigma_{tt}^2$",
+      "units": "",
+      "sigma": "TT"		
+    }	
+  },
+
+  "sp": {
+    "raw": {
+      "label": "$E_{pp}$",
+      "units": "[$Pa^2 Hz$]"
+    },
+    "norm": {
+      "label": "$f \\cdot E_{pp} / \\sigma_{pp}^2$",
+      "units": "",
+      "sigma": "pp"		
+    }	
+  }
+}

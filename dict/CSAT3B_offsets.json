@@ -1,0 +1,49 @@
+{
+  "_comment": "Intercomparison wind sensors (St5 lv1 used as a reference). da = measured - reference",
+  "st1": {
+    "SonTemp": 0.08,
+    "Ux": 0.01,
+    "Uy": -0.0,
+    "Uz": -0.01,
+    "U": 0.0
+  },
+  "st2": {
+    "SonTemp": 0.24,
+    "Ux": 0.04,
+    "Uy": 0.01,
+    "Uz": 0.01,
+    "U": 0.0
+  },
+  "st3": {
+    "SonTemp": -0.6,
+    "Ux": -0.06,
+    "Uy": -0.05,
+    "Uz": 0.01,
+    "U": 0.05
+  },
+  "st4": {
+    "SonTemp": -0.54,
+    "Ux": 0.02,
+    "Uy": 0.03,
+    "Uz": -0.02,
+    "U": -0.02
+  },
+  "st5": {
+    "SonTemp": 0.02,
+    "Ux": -0.03,
+    "Uy": 0.15,
+    "Uz": -0.02,
+    "U": -0.15
+  },
+  "st6": {
+    "SonTemp": -0.02,
+    "Ux": -0.01,
+    "Uy": -0.0,
+    "Uz": 0.01,
+    "U": -0.0
+  }
+}
+
+
+
+

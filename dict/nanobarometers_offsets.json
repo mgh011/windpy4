@@ -1,0 +1,13 @@
+{
+    "_comment": "Intercomparison pressure sensors (St5 lv1 as a reference). da = measured - reference",
+    "sensors": {
+        "st1": {"hf_pressure_lvl_1": -0.19},
+        "st2": {"hf_pressure_lvl_1": -0.13, 
+		"hf_pressure_lvl_2": -0.26},
+        "st3": {"hf_pressure_lvl_1": -0.27},
+        "st4": {"hf_pressure_lvl_1": 0.07},
+        "st5": {"hf_pressure_lvl_1": 0, 
+		"hf_pressure_lvl_2": -0.28},
+        "st6": {"hf_pressure_lvl_1": -0.17}
+    }
+}

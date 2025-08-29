@@ -1,0 +1,16 @@
+{
+ "path":"/Users/mauro_ghirardelli/Documents/TEAMx/20250416_analisi/",
+ "window": "10min", 
+ "avg_method": "detrend", 
+ "gap_filling": "test", 
+
+ "autocorr": true,
+
+ "spectra": true, 
+ "processing_method": "smoothing",
+
+ "microbarom": true,
+
+ "anisotropy": true
+
+}
