@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import sys
+import os
+import pickle
+from glob import glob
+from pathlib import Path
+from typing import List, Tuple, Dict, Optional
+
+import numpy as np
+import pandas as pd
+import xarray as xr
+import matplotlib.pyplot as plt
+import json
+
+sys.path.append('/Users/mauro_ghirardelli/Documents/windpy4/src')
+from workflow import process_station_qc_step1, process_step2_across_stations, process_step3_across_stations, process_step4_across_stations
+from workflow import plot_random_pressure_spectra_from_step2, plot_random_pressure_spectra_from_step3, plot_random_kaimal_from_step4
+
+
+# Load config (expects a JSON with a key "path" pointing to the folder that contains st1..st6)
+config_path = "/Users/mauro_ghirardelli/Documents/windpy4/conf/config_10min.txt"
+with open(config_path, "r") as f:
+    config = json.load(f)
+
+base_path = config["path"]  # e.g., "/.../windpy4/data/"
+#%%
+# =========================
+# QC FILTERING
+# =========================
+# 1) Step 1: get pairs per station
+pairs_step1_by_station = {}
+for i in range(1, 7):
+    st = f"st{i}"
+    pairs_step1_by_station[st] = process_station_qc_step1(
+        base_path=base_path,
+        station=st,
+        qc_threshold=0.05,
+        plot=True,  # plot only at the end if vuoi
+    )
+
+#%%
+# =========================
+# MB FILTERING
+# =========================
+# 2) Step 2: robust-MB filter across ALL stations (global stats)
+pairs_step2_by_station = process_step2_across_stations(
+    base_path=base_path,
+    pairs_by_station=pairs_step1_by_station,
+    tau_z=3.0,           # <- your threshold
+    direction="above",   # "above" (high MB), "below" (low MB), or "abs"
+    plot=True,           # plot filtered points per station
+    plot_kwargs=dict(marker_size=6, jitter_minutes=0.0, sort_days="asc"),
+)
+
+
+
+# After you already computed pairs_step2_by_station = process_step2_across_stations(...)
+plot_random_pressure_spectra_from_step2(
+    pairs_step2_by_station=pairs_step2_by_station,
+    base_path=base_path,
+    k=9,
+    seed=2,
+    fband=(0.1, 0.4),
+)
+#%%
+# =========================
+# COHERENCE FILTERING
+# =========================
+# STEP 3 su tutte le stazioni, partendo dai pairs dello Step 2
+pairs_step3_by_station = process_step3_across_stations(
+    base_path=base_path,
+    pairs_by_station_step2=pairs_step2_by_station,  # output del tuo Step 2
+    band=(0.1, 0.4),
+    win=0.03,
+    thr=0.40,
+    mode="any",    # or "both", "u_only", "w_only"
+    plot=True
+)
+
+
+# After you already computed pairs_step2_by_station = process_step2_across_stations(...)
+plot_random_pressure_spectra_from_step3(
+    pairs_step2_by_station=pairs_step3_by_station,
+    base_path=base_path,
+    k=9,
+    seed=2,
+    fband=(0.1, 0.4),
+)
+#%%
+# =========================
+# ISR FILTERING
+# =========================
+pairs_step4_by_station = process_step4_across_stations(
+    base_path=base_path,
+    pairs_by_station_step3=pairs_step3_by_station,
+    band=(0.1, 0.4),
+    keep_if="after_fm",                 # “picco dopo fm” ⇒ in ISR
+    require_fm_below_bandmin=True,      # opzionale: pretendi fm ≤ 0.1 Hz
+    Lw_var="intlenW",
+    U_var="meanU",
+    c0=0.164/3.8, cm=0.164              # come nel tuo snippet (fm = 4·f0)
+)
+#%%
+plot_random_kaimal_from_step4(
+    pairs_step4_by_station=pairs_step4_by_station,
+    base_path=base_path,
+    k=4,
+    seed=123,
+    r_fm=3.8,      # use Kaimal fm ≈ 3.8·f0
+    c_const=0.164  # fm = 0.164 * U / Lw
+)
+
+

@@ -12,14 +12,14 @@ import pandas as pd
 import pickle
 
 #import local libraries
-sys.path.append('/Users/mauro_ghirardelli/Documents/windpy3/src/')
+sys.path.append('/Users/mauro_ghirardelli/Documents/windpy4/src/')
 
 
 from stats import fill_gaps, fill_gaps_test
 from rotations import double_rotation
 from fluxes import fluxes_calc
 from scales import stationarity
-from spectral_analysis import spectra_eps, coherence_welch_from_ds
+from spectral_analysis import spectra_eps, coherence_from_spectra
 from autocorrelation import autocorrelation
 from microbarom import get_microbarom
 from ogive import compute_ogive
@@ -104,14 +104,20 @@ def process(ds, config):
     # ==========================
     # spectra
     if config["spectra"]:
-        _, spectra, epsilon, slopes = spectra_eps(ds, config, fluxes.meanU)
+        raw_spectra, welch_spectra, spectra, epsilon, slopes = spectra_eps(
+            ds, config, fluxes.meanU,
+            raw_segments=None, raw_overlap=0.0,
+            welch_segments=8, welch_overlap=0.5
+        )
+
 
         statistics = xr.merge([statistics, epsilon, slopes])
-        #results['raw_spectra'] = raw_spectra
-        #results['binned_spectra'] = binned_spectra
-        results["spectra"] = spectra
+        
+        #results["raw_spectra"] = raw_spectra          # FFT/periodogram "pure"
+        #results["welch_spectra"] = welch_spectra      # Welch (3, 50%)
+        results["spectra"] = spectra                  # SG sul RAW (smoothed)
         # NEW: classical coherence from RAW (pre-smoothing)
-        results["coherence"] = coherence_welch_from_ds(ds, config)
+        results["coherence"]     = coherence_from_spectra(welch_spectra)
 
     
     
@@ -158,10 +164,10 @@ def process(ds, config):
 
 
 
-station = 'st2'
+station = 'st6'
 
 # Load configuration file
-config_path = '/Users/mauro_ghirardelli/Documents/windpy3/conf/config_10min.txt'
+config_path = '/Users/mauro_ghirardelli/Documents/windpy4/conf/config_10min.txt'
 with open(config_path, 'r') as file:
     config = json.load(file)
     

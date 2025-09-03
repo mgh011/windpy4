@@ -16,40 +16,76 @@ from fluxes import get_fluctuations
 
 # Main routine
 # -------------
-def spectra_eps(ds, config, wspd):
-    '''works on already rotated data
-    At the moment the dissipation calculation for single sonic should work only if there is a height dimension with 1 value'''
 
-    # config
+def spectra_eps(ds, config, wspd, *, raw_segments=None, raw_overlap=0.0,
+                welch_segments=3, welch_overlap=0.5):
+    """
+    Compute raw periodogram spectra, Welch spectra, smoothed spectra,
+    and dissipation/slopes.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Input high-frequency dataset.
+    config : dict
+        Configuration dictionary; must include key 'window'.
+    wspd : float
+        Mean wind speed (m/s).
+    raw_segments : int or None, optional
+        Number of Welch segments for raw spectra.
+        If None, use a single segment (periodogram).
+    raw_overlap : float, optional
+        Overlap fraction for raw spectra (0.0 to 1.0).
+    welch_segments : int, optional
+        Number of Welch segments for welch_spectra (default 3).
+    welch_overlap : float, optional
+        Overlap fraction for welch_spectra (default 0.5).
+
+    Returns
+    -------
+    raw_spectra : xarray.Dataset
+        Periodogram or Welch spectra for raw settings.
+    welch_spectra : xarray.Dataset
+        Welch spectra with chosen segments and overlap.
+    spectra : xarray.Dataset
+        Savitzky–Golay smoothed version of raw spectra.
+    epsilon : xarray.Dataset
+        Dissipation rate estimates.
+    slopes : xarray.Dataset
+        Low- and high-frequency slopes.
+    """
     window = config['window']
-    #processing_method = config['processing_method']
-    
-
-    # divide in time blocks
     ds_fluct = get_fluctuations(ds, config)
 
-    # spectra & co
-    raw_spectra = spectra_raw(ds_fluct, window)
-    #binned_spectra = spectra_binning(raw_spectra)
+    # Options for raw and Welch spectra
+    raw_opts = dict(segments=raw_segments, overlap=raw_overlap,
+                    window='boxcar', detrend=False)
+    welch_opts = dict(segments=welch_segments, overlap=welch_overlap,
+                      window='hann', detrend='constant')
+
+    # Compute spectra
+    raw_spectra = spectra_raw(ds_fluct, window, spec_opts=raw_opts)
+    welch_spectra = spectra_raw(ds_fluct, window, spec_opts=welch_opts)
     spectra = spectra_processed(raw_spectra)
 
-    # slopes high and low freq and dissipation rates
+    # Compute slopes and epsilon
     slopes, epsilon = spectral_slopes_epsilon(spectra, wspd)
 
-    return raw_spectra, spectra, epsilon, slopes
+    return raw_spectra, welch_spectra, spectra, epsilon, slopes
+
 
 
 
 
 # Subroutines
 # -------------
-def spectra_raw(ds, window):
+def spectra_raw(ds, window, spec_opts=None):
     """
-    Calculates spectra and cospectra for high-frequency (hf) dataset (xarray) by time window.
+    Calculates spectra and cospectra for a high-frequency (hf) dataset (xarray) by time window.
     The dataset must be already rotated and detrended. This function supports both single and 
     multiple sonic setups (with multiple heights) and includes an additional variable 'p'
     (e.g., pressure) if available.
-    
+
     Parameters
     ----------
     ds : xarray.Dataset
@@ -57,21 +93,29 @@ def spectra_raw(ds, window):
         It should have coordinate dimensions 'time' and 'heights' (if multiple sonics).
     window : str or pandas offset
         Window specification used for resampling the dataset in time.
-    
+    spec_opts : dict, optional
+        Keyword arguments forwarded to `calc_spectrum` and `calc_cospectrum`
+        (e.g., {'segments': 3, 'overlap': 0.5, 'window': 'hann', 'detrend': 'constant'}).
+        If None, the default behavior matches a single-segment periodogram.
+
     Returns
     -------
     spectra : xarray.Dataset
         Dataset with coordinates 'time', 'freq', and 'heights' (if multiple sonics).
         Data variables include:
             - su, sv, sw, sT: spectra for u, v, w, and sonic temperature (tc)
+            - stke: spectrum of turbulent kinetic energy proxy (0.5*(u^2+v^2+w^2))
             - sp: spectrum for p (if 'p' exists in the input dataset)
             - cuw, cuv, cvw, cwT, cvT, cuT: cospectra between variables (u, v, w, tc)
-            - cup, cvp, cwp, cTp: cospectra between variables and p (if pressure data is available)
-    
+            - cup, cvp, cwp, cTp: cospectra between variables and p (if pressure available)
+
     Notes
     -----
     The function will have issues if the data length is not an exact multiple of the window size.
     """
+    if spec_opts is None:
+        spec_opts = {}
+
     # check if multiple heights are present
     if len(np.shape(ds.u)) == 1:
         single_sonic = True
@@ -82,7 +126,6 @@ def spectra_raw(ds, window):
     ds_groups = ds.resample(time=window)
     spectra = []
     
-
     # # one sonic
     if single_sonic:
         for label, group in tqdm(ds_groups, desc="Spectra calculation"):
@@ -93,39 +136,38 @@ def spectra_raw(ds, window):
             tke = 0.5 * (u**2 + v**2 + w**2)
             p = group.p if 'p' in group else None
                 
-            
             #==========
             # spectra
             #==========
-            freq, su = calc_spectrum(u)
-            freq, sv = calc_spectrum(v)
-            freq, sw = calc_spectrum(w)
-            freq, sT = calc_spectrum(tc)
-            freq, stke = calc_spectrum(tke)
+            freq, su = calc_spectrum(u, **spec_opts)
+            freq, sv = calc_spectrum(v, **spec_opts)
+            freq, sw = calc_spectrum(w, **spec_opts)
+            freq, sT = calc_spectrum(tc, **spec_opts)
+            freq, stke = calc_spectrum(tke, **spec_opts)
                 
-             # Compute spectrum for 'p' if available
+            # Compute spectrum for 'p' if available
             if p is not None:
-                freq, sp = calc_spectrum(p)
+                freq, sp = calc_spectrum(p, **spec_opts)
             else:
                 sp = None
+
             #==========
             # cospectra
             #==========
-            freq, cuw = calc_cospectrum(u, w)
-            freq, cvw = calc_cospectrum(v, w)
-            freq, cuv = calc_cospectrum(u, v)
-            freq, cuT = calc_cospectrum(u, tc)
-            freq, cvT = calc_cospectrum(v, tc)
-            freq, cwT = calc_cospectrum(w, tc)
-            
-            freq, ctkeT = calc_cospectrum(tke, tc)
+            freq, cuw = calc_cospectrum(u, w, **spec_opts)
+            freq, cvw = calc_cospectrum(v, w, **spec_opts)
+            freq, cuv = calc_cospectrum(u, v, **spec_opts)
+            freq, cuT = calc_cospectrum(u, tc, **spec_opts)
+            freq, cvT = calc_cospectrum(v, tc, **spec_opts)
+            freq, cwT = calc_cospectrum(w, tc, **spec_opts)
+            freq, ctkeT = calc_cospectrum(tke, tc, **spec_opts)
             
             if p is not None:
-                freq, cup = calc_cospectrum(u, p)
-                freq, cvp = calc_cospectrum(v, p)
-                freq, cwp = calc_cospectrum(w, p)
-                freq, cTp = calc_cospectrum(tc, p)
-                freq, ctkep = calc_cospectrum(tke, p)
+                freq, cup = calc_cospectrum(u, p, **spec_opts)
+                freq, cvp = calc_cospectrum(v, p, **spec_opts)
+                freq, cwp = calc_cospectrum(w, p, **spec_opts)
+                freq, cTp = calc_cospectrum(tc, p, **spec_opts)
+                freq, ctkep = calc_cospectrum(tke, p, **spec_opts)
             else:
                 cup = None
                 cvp = None
@@ -139,6 +181,7 @@ def spectra_raw(ds, window):
                 sv=(['freq'], sv),
                 sw=(['freq'], sw),
                 sT=(['freq'], sT),
+                stke=(['freq'], stke),
                 cuw=(['freq'], cuw),
                 cuv=(['freq'], cuv),
                 cvw=(['freq'], cvw),
@@ -146,7 +189,6 @@ def spectra_raw(ds, window):
                 cvT=(['freq'], cvT),
                 cuT=(['freq'], cuT),
                 ctkeT=(['freq'], ctkeT),
-                
             )
             if sp is not None:
                 data_vars['sp'] = (['freq'], sp)
@@ -156,9 +198,8 @@ def spectra_raw(ds, window):
                 data_vars['cTp'] = (['freq'], cTp)
                 data_vars['ctkep'] = (['freq'], ctkep)
                 
-                
             spectra.append(xr.Dataset(coords=dict(freq=freq, time=label),
-                                        data_vars=data_vars))
+                                      data_vars=data_vars))
         spectra = xr.concat(spectra, dim='time').assign_coords(heights=ds.heights)
 
     # multiple sonics
@@ -172,42 +213,40 @@ def spectra_raw(ds, window):
                 v = grouph.v
                 w = grouph.w
                 tc = grouph.tc
-                tke = 0.5 * (u**2 + v**2 + w**2)**0.5
+                tke = 0.5 * (u**2 + v**2 + w**2)
                 p = grouph.p if 'p' in grouph else None
 
                 #==========
                 # spectra
                 #==========
-                freq, su = calc_spectrum(u)
-                freq, sv = calc_spectrum(v)
-                freq, sw = calc_spectrum(w)
-                freq, sT = calc_spectrum(tc)
-                
-                freq, stke = calc_spectrum(tke)
+                freq, su = calc_spectrum(u, **spec_opts)
+                freq, sv = calc_spectrum(v, **spec_opts)
+                freq, sw = calc_spectrum(w, **spec_opts)
+                freq, sT = calc_spectrum(tc, **spec_opts)
+                freq, stke = calc_spectrum(tke, **spec_opts)
                 
                 if p is not None:
-                    freq, sp = calc_spectrum(p)
+                    freq, sp = calc_spectrum(p, **spec_opts)
                 else:
                     sp = None
                 
                 #==========
                 # cospectra
                 #==========
-                freq, cuw = calc_cospectrum(u,w)
-                freq, cvw = calc_cospectrum(v,w)
-                freq, cuv = calc_cospectrum(u,v) 
-                freq, cuT = calc_cospectrum(u,tc) 
-                freq, cvT = calc_cospectrum(v,tc) 
-                freq, cwT = calc_cospectrum(w,tc) 
-                
-                freq, ctkeT = calc_cospectrum(tke,tc)
+                freq, cuw = calc_cospectrum(u, w, **spec_opts)
+                freq, cvw = calc_cospectrum(v, w, **spec_opts)
+                freq, cuv = calc_cospectrum(u, v, **spec_opts) 
+                freq, cuT = calc_cospectrum(u, tc, **spec_opts) 
+                freq, cvT = calc_cospectrum(v, tc, **spec_opts) 
+                freq, cwT = calc_cospectrum(w, tc, **spec_opts) 
+                freq, ctkeT = calc_cospectrum(tke, tc, **spec_opts)
                 
                 if p is not None:
-                    freq, cup = calc_cospectrum(u, p)
-                    freq, cvp = calc_cospectrum(v, p)
-                    freq, cwp = calc_cospectrum(w, p)
-                    freq, cTp = calc_cospectrum(tc, p)
-                    freq, ctkep = calc_cospectrum(tke, p)
+                    freq, cup = calc_cospectrum(u, p, **spec_opts)
+                    freq, cvp = calc_cospectrum(v, p, **spec_opts)
+                    freq, cwp = calc_cospectrum(w, p, **spec_opts)
+                    freq, cTp = calc_cospectrum(tc, p, **spec_opts)
+                    freq, ctkep = calc_cospectrum(tke, p, **spec_opts)
                 else:
                     cup = None
                     cvp = None
@@ -243,6 +282,7 @@ def spectra_raw(ds, window):
 
         spectra = xr.concat(spectra, dim='time')
     return spectra
+
 
 def spectra_processed(ds,
                       window_pts=11,
@@ -379,42 +419,151 @@ def spectral_slopes_epsilon(spectra, wspd, h=None):
 
 # Helpers
 # -------------
-def calc_spectrum(var, dt=None):
-    #only real
+
+def _resolve_welch_params(n, segments=None, overlap=0.0):
+    """
+    Derive (nperseg, noverlap) for Welch/csd given the desired number of segments
+    and the overlap fraction. If `segments` is None, returns (n, 0), i.e. a single
+    full-length segment (periodogram-like behavior).
+
+    Parameters
+    ----------
+    n : int
+        Total number of samples in the time series.
+    segments : int or None
+        Desired number of Welch segments. If None, use a single segment of length n.
+    overlap : float
+        Overlap fraction between segments in [0, 1). Typical values: 0.0, 0.5.
+
+    Returns
+    -------
+    nperseg : int
+        Samples per segment.
+    noverlap : int
+        Samples of overlap between segments.
+    """
+    if not segments:
+        return n, 0
+    ov = float(overlap)
+    ov = max(0.0, min(0.95, ov))
+    denom = (1.0 + (segments - 1) * (1.0 - ov))
+    nperseg = max(8, int(np.floor(n / denom)))
+    noverlap = int(np.floor(ov * nperseg))
+    return nperseg, noverlap
+
+
+def calc_spectrum(var, dt=None, *, segments=None, overlap=0.0,
+                  window='boxcar', detrend=False, scaling='density'):
+    """
+    Compute the power spectral density (PSD) using Welch's method, or a single-
+    segment periodogram if `segments=None`.
+
+    Parameters
+    ----------
+    var : xarray.DataArray
+        Input time series with a 'time' coordinate.
+    dt : float, optional
+        Sampling interval in seconds. If None, inferred from 'time'.
+    segments : int or None, optional
+        Number of Welch segments. None => use whole series (periodogram-like).
+    overlap : float, optional
+        Overlap fraction between segments (0..1). Ignored if segments=None.
+    window : str or array_like, optional
+        Window type passed to scipy.signal.welch (e.g., 'boxcar', 'hann').
+    detrend : str or bool, optional
+        Detrending option for welch (e.g., False, 'constant', 'linear').
+    scaling : {'density','spectrum'}, optional
+        Scaling of the result.
+
+    Returns
+    -------
+    freq : ndarray
+        Frequencies (Hz), with f[0] removed.
+    spectrum : ndarray
+        PSD values corresponding to `freq`.
+    """
     n = len(var)
     if dt is None:
         dt = (var.time[1] - var.time[0]).item() / 1e9
-    freq, spectrum = signal.welch(var, fs=1 / dt,
-                                  window='boxcar', detrend=False,
-                                  nperseg=n, noverlap=0)
-    freq = freq[1:]
-    spectrum = spectrum[1:].real
+    x = np.asarray(var.values)
+    fs = 1.0 / dt
 
-    return freq, spectrum
+    nperseg, noverlap = _resolve_welch_params(n, segments=segments, overlap=overlap)
+    freq, spectrum = signal.welch(
+        x, fs=fs, window=window, detrend=detrend,
+        nperseg=nperseg, noverlap=noverlap, scaling=scaling
+    )
+    return freq[1:], spectrum[1:].real
 
 
-def calc_cospectrum(var1, var2, dt=None):
-    #imaginary number
+def calc_cospectrum(var1, var2, dt=None, *, segments=None, overlap=0.0,
+                    window='boxcar', detrend=False, scaling='density'):
+    """
+    Compute the (complex) cross-spectrum using Welch's method, or a single-
+    segment estimate if `segments=None`.
+
+    Parameters
+    ----------
+    var1, var2 : xarray.DataArray
+        Input time series sharing the same 'time' coordinate.
+    dt : float, optional
+        Sampling interval in seconds. If None, inferred from 'time' of var1.
+    segments : int or None, optional
+        Number of Welch segments. None => use whole series (periodogram-like).
+    overlap : float, optional
+        Overlap fraction between segments (0..1). Ignored if segments=None.
+    window : str or array_like, optional
+        Window type passed to scipy.signal.csd (e.g., 'boxcar', 'hann').
+    detrend : str or bool, optional
+        Detrending option for csd (e.g., False, 'constant', 'linear').
+    scaling : {'density','spectrum'}, optional
+        Scaling of the result.
+
+    Returns
+    -------
+    freq : ndarray
+        Frequencies (Hz), with f[0] removed.
+    cospectrum : ndarray (complex)
+        Cross-spectral density corresponding to `freq`.
+    """
     n = len(var1)
     if dt is None:
         dt = (var1.time[1] - var1.time[0]).item() / 1e9
 
-    freq, cospectrum = signal.csd(var1, var2, fs=1 / dt,
-                                  window='boxcar', detrend=False,
-                                  nperseg=n, noverlap=0)
-    freq = freq[1:]
-    cospectrum = cospectrum[1:]
+    x = np.asarray(var1.values)
+    y = np.asarray(var2.values)
+    fs = 1.0 / dt
 
-    return freq, cospectrum
+    nperseg, noverlap = _resolve_welch_params(n, segments=segments, overlap=overlap)
+    freq, cospectrum = signal.csd(
+        x, y, fs=fs, window=window, detrend=detrend,
+        nperseg=nperseg, noverlap=noverlap, scaling=scaling
+    )
+    return freq[1:], cospectrum[1:]
+
 
 def is_cospectrum(name: str) -> bool:
+    """
+    Identify whether a variable name refers to a co-spectrum (cross-spectrum)
+    or to an auto-spectrum.
+
+    Parameters
+    ----------
+    name : str
+        Variable name (e.g., 'su', 'cuw', 'ctkeT').
+
+    Returns
+    -------
+    bool
+        True if it looks like a cospectrum, False if auto-spectrum.
+    """
     n = name.lower()
-    autos = ("su","sv","sw","sT","sp","stke")  # include your autos as needed (note: case-insensitive)
+    autos = ("su", "sv", "sw", "st", "sp", "stke")  # note: 'sT' -> 'st' after lower()
     if n in autos:
         return False
-    # typical cross-spectra keys (cover uv, uw, vw, *p, *T, tke*)
-    keys = ("cuv","cuw","cvw","cup","cvp","cwp","cuT","cvT","cwT","ctkeT","ctkep","cTp")
+    keys = ("cuv", "cuw", "cvw", "cup", "cvp", "cwp", "cut", "cvt", "cwt", "ctket", "ctkep", "ctp")
     return any(k in n for k in keys)
+
 
 
 
@@ -538,123 +687,60 @@ def reduce_spectrum_logscale(freq, spectrum, n_bins=2000):
 
 # ---- BLOCCO coerenza
 
-from scipy.signal import coherence
-from fluxes import get_fluctuations
+def coherence_from_spectra(welch_spectra: xr.Dataset) -> xr.Dataset:
+    """
+    Build Welch coherence directly from autospectra and cospectra contained in
+    `welch_spectra`:
+        Coh_xy = |S_xy|^2 / (S_xx * S_yy)
 
-def _welch_params(N):
-    nperseg = max(256, min(4096, N // 8))  # ~8 segmenti + 50% overlap
-    noverlap = nperseg // 2
-    return nperseg, noverlap
+    Expected variables (compute only those that exist):
+      autos: su, sv, sw, sT, (sp optional)
+      co:    cuw, cvw, cuv, cwT, cvT, cuT, (cup, cvp, cwp, cTp optional)
 
-def _compute_welch_coh_pairs(data_dict, fs):
-    keys = [k for k in ['u','v','w','tc','p'] if k in data_dict]
-    m = np.ones_like(data_dict[keys[0]], dtype=bool)
-    for k in keys:
-        m &= np.isfinite(data_dict[k])
-    for k in keys:
-        data_dict[k] = data_dict[k][m]
-    N = len(data_dict[keys[0]])
-    if N < 256:
-        return None
+    Returns
+    -------
+    xr.Dataset with dims matching `welch_spectra` (time, freq[, heights]) and
+    data_vars like: coh_uw, coh_vw, coh_uv, coh_wT, coh_vT, coh_uT, (coh_up, coh_vp, coh_wp, coh_Tp).
+    Values are clipped to [0, 1].
+    """
+    S = welch_spectra
 
-    nperseg, noverlap = _welch_params(N)
+    # mapping: (auto_x, auto_y, co_xy, out_name)
+    pairs = [
+        ('su', 'sw', 'cuw', 'coh_uw'),
+        ('sv', 'sw', 'cvw', 'coh_vw'),
+        ('su', 'sv', 'cuv', 'coh_uv'),
+        ('sw', 'sT', 'cwT', 'coh_wT'),
+        ('sv', 'sT', 'cvT', 'coh_vT'),
+        ('su', 'sT', 'cuT', 'coh_uT'),
+        # pressure (optional)
+        ('su', 'sp', 'cup', 'coh_up'),
+        ('sv', 'sp', 'cvp', 'coh_vp'),
+        ('sw', 'sp', 'cwp', 'coh_wp'),
+        ('sT', 'sp', 'cTp', 'coh_Tp'),
+    ]
+
     out = {}
-    f, c = coherence(data_dict['u'], data_dict['w'], fs=fs, window='hann',
-                     nperseg=nperseg, noverlap=noverlap, detrend='constant')
-    out['f'] = f; out['coh_uw'] = np.clip(c, 0.0, 1.0)
+    for sxx, syy, sxy, name in pairs:
+        if (sxx in S.data_vars) and (syy in S.data_vars) and (sxy in S.data_vars):
+            # |Sxy|^2 / (Sxx * Syy), safe & clipped
+            num = np.abs(S[sxy])**2
+            den = (np.real(S[sxx]) * np.real(S[syy]))
+            coh = xr.where(den > 0, (num / den), np.nan)
+            out[name] = coh.clip(0.0, 1.0)
 
-    _, c = coherence(data_dict['v'], data_dict['w'], fs=fs, window='hann',
-                     nperseg=nperseg, noverlap=noverlap, detrend='constant')
-    out['coh_vw'] = np.clip(c, 0.0, 1.0)
+    if not out:
+        # nothing to compute
+        return xr.Dataset(coords=S.coords)
 
-    _, c = coherence(data_dict['u'], data_dict['v'], fs=fs, window='hann',
-                     nperseg=nperseg, noverlap=noverlap, detrend='constant')
-    out['coh_uv'] = np.clip(c, 0.0, 1.0)
+    ds_coh = xr.Dataset(out, coords=S.coords)
 
-    _, c = coherence(data_dict['w'], data_dict['tc'], fs=fs, window='hann',
-                     nperseg=nperseg, noverlap=noverlap, detrend='constant')
-    out['coh_wT'] = np.clip(c, 0.0, 1.0)
-
-    _, c = coherence(data_dict['v'], data_dict['tc'], fs=fs, window='hann',
-                     nperseg=nperseg, noverlap=noverlap, detrend='constant')
-    out['coh_vT'] = np.clip(c, 0.0, 1.0)
-
-    _, c = coherence(data_dict['u'], data_dict['tc'], fs=fs, window='hann',
-                     nperseg=nperseg, noverlap=noverlap, detrend='constant')
-    out['coh_uT'] = np.clip(c, 0.0, 1.0)
-
-    if 'p' in data_dict:
-        _, c = coherence(data_dict['u'], data_dict['p'], fs=fs, window='hann',
-                         nperseg=nperseg, noverlap=noverlap, detrend='constant')
-        out['coh_up'] = np.clip(c, 0.0, 1.0)
-        _, c = coherence(data_dict['v'], data_dict['p'], fs=fs, window='hann',
-                         nperseg=nperseg, noverlap=noverlap, detrend='constant')
-        out['coh_vp'] = np.clip(c, 0.0, 1.0)
-        _, c = coherence(data_dict['w'], data_dict['p'], fs=fs, window='hann',
-                         nperseg=nperseg, noverlap=noverlap, detrend='constant')
-        out['coh_wp'] = np.clip(c, 0.0, 1.0)
-        _, c = coherence(data_dict['tc'], data_dict['p'], fs=fs, window='hann',
-                         nperseg=nperseg, noverlap=noverlap, detrend='constant')
-        out['coh_Tp'] = np.clip(c, 0.0, 1.0)
-    return out
-
-def coherence_welch_from_ds(ds, config):
-    """
-    Calcola la coerenza (Welch) per finestre da config['window'] usando direttamente 'ds'
-    (ruotato/detrendato), senza esporre ds_fluct al main.
-    Ritorna un xr.Dataset con dims (time, freq[, heights]).
-    """
-    fs = 20
-    window = config['window']
-    single_sonic = (len(np.shape(ds.u)) == 1)
-
-    # ottiene le fluttuazioni nello stesso modo del blocco spettri
-    ds_fluct = get_fluctuations(ds, config)
-    ds_groups = ds_fluct.resample(time=window)
-    out_list = []
-
-    if single_sonic:
-        for label, g in ds_groups:
-            if g.time.size < 256:
-                continue
-            d = {'u': g.u.values, 'v': g.v.values, 'w': g.w.values, 'tc': g.tc.values}
-            if 'p' in g:
-                d['p'] = g.p.values
-            res = _compute_welch_coh_pairs(d, fs)
-            if res is None:
-                continue
-            data_vars = {k: (['freq'], res[k]) for k in res if k != 'f'}
-            out_list.append(xr.Dataset(coords=dict(freq=res['f'], time=label),
-                                       data_vars=data_vars))
-        if not out_list:
-            return xr.Dataset()
-        ds_coh = xr.concat(out_list, dim='time').assign_coords(heights=ds.heights)
-    else:
-        for label, g in ds_groups:
-            per_h = []
-            for h in g.heights:
-                gh = g.sel(heights=h)
-                if gh.time.size < 256:
-                    continue
-                d = {'u': gh.u.values, 'v': gh.v.values, 'w': gh.w.values, 'tc': gh.tc.values}
-                if 'p' in gh:
-                    d['p'] = gh.p.values
-                res = _compute_welch_coh_pairs(d, fs)
-                if res is None:
-                    continue
-                data_vars = {k: (['freq'], res[k]) for k in res if k != 'f'}
-                per_h.append(xr.Dataset(coords=dict(freq=res['f'], time=label, heights=h),
-                                        data_vars=data_vars))
-            if per_h:
-                out_list.append(xr.concat(per_h, dim='heights'))
-        if not out_list:
-            return xr.Dataset()
-        ds_coh = xr.concat(out_list, dim='time')
-
+    # attrs (optional)
     for v in ds_coh.data_vars:
-        ds_coh[v].attrs.update({'long_name': f'Coherence {v[4:].replace("_","-")}',
-                                'units': '—', 'method': 'Welch'})
-    ds_coh.freq.attrs.update({'long_name': 'frequency', 'units': 'Hz'})
+        ds_coh[v].attrs.update({'long_name': f"Coherence {v[4:].replace('_','-')}",
+                                'units': '—', 'method': 'Welch from spectra'})
+    if 'freq' in ds_coh.coords:
+        ds_coh.freq.attrs.update({'long_name': 'frequency', 'units': 'Hz'})
     return ds_coh
 
 
