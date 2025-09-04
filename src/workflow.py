@@ -325,7 +325,11 @@ def mask_to_pairs(mask_da: xr.DataArray) -> List[Tuple[pd.Timestamp, int]]:
     return list(zip(times, heights.tolist()))
 
 # =========================
-# STEP 2 — Robust MB filter (global robust z across all stations)
+# =========================
+# =========================
+# Robust MB filter (global robust z across all stations)
+# =========================
+# =========================
 # =========================
 
 def robust_z(x: np.ndarray) -> tuple[np.ndarray, float, float]:
@@ -355,6 +359,7 @@ def gather_mb_rows_for_station(
     base_path: str,
     station: str,
     pairs_step1: list[tuple[pd.Timestamp, int]],
+    MB_rel: bool = False,
 ) -> pd.DataFrame:
     """
     For a given station and its Step-1 valid pairs (time, height),
@@ -397,7 +402,9 @@ def gather_mb_rows_for_station(
             del ds
             continue
 
+
         MB = (stats["MB_peak"] / stats["MB_fit"]).astype(float)  # (time, heights)
+        #MB = (stats["MB_peak"]).astype(float)  # (time, heights)
         times_file = pd.to_datetime(stats["time"].values)  # exact coordinates
         heights_file = stats["heights"].values
 
@@ -480,7 +487,7 @@ def filter_pairs_by_global_MB(
     return filtered_df, {"median": med, "mad": mad}
 
 
-def process_step2_across_stations(
+def filter_MB_across_stations(
     base_path: str,
     pairs_by_station: dict[str, list[tuple[pd.Timestamp, int]]],
     *,
@@ -556,10 +563,13 @@ def process_step2_across_stations(
 
     return filtered_pairs_by_station
 
-
-# =========================
-# STEP 3 — Coherence gate around the microbarom peak
-# =========================
+# ========================= # ========================= #
+# ========================= # ========================= #
+# ========================= # ========================= #
+#     Coherence gate around the microbarom peak         #
+# ========================= # ========================= #
+# ========================= # ========================= #
+# ========================= # ========================= #
 
 def _sp_peak_in_band(f_spec, Spp, band) -> tuple[bool, Optional[float]]:
     """
@@ -723,9 +733,9 @@ def process_station_filter3(
 
     return kept
 
-def process_step3_across_stations(
+def process_coherence_across_stations(
     base_path: str,
-    pairs_by_station_step2: dict[str, list[tuple[pd.Timestamp, int]]],
+    pairs_by_station: dict[str, list[tuple[pd.Timestamp, int]]],
     *,
     band: tuple[float, float] = (0.1, 0.4),
     win: float = 0.03,
@@ -741,7 +751,7 @@ def process_step3_across_stations(
     stations = [f"st{i}" for i in range(1, 7)]
     out: dict[str, list[tuple[pd.Timestamp, int]]] = {}
     for st in stations:
-        pairs_in = pairs_by_station_step2.get(st, [])
+        pairs_in = pairs_by_station.get(st, [])
         out[st] = process_station_filter3(
             base_path=base_path,
             station=st,
@@ -752,9 +762,13 @@ def process_step3_across_stations(
         )
     return out
 
-# =========================
-# STEP 4 — Inertial Subrange (Kaimal) gate
-# =========================
+# ========================= # ========================= #
+# ========================= # ========================= #
+# ========================= # ========================= #
+#          Inertial Subrange (Kaimal) gate              #
+# ========================= # ========================= #
+# ========================= # ========================= #
+# ========================= # ========================= #
 
 
 def _kaimal_f0_fm_from_intlenW_meanU(
@@ -879,9 +893,9 @@ def process_station_filter4_isr(
 
     return kept
 
-def process_step4_across_stations(
+def process_ISR_across_stations(
     base_path: str,
-    pairs_by_station_step3: dict[str, list[tuple[pd.Timestamp, int]]],
+    pairs_by_station: dict[str, list[tuple[pd.Timestamp, int]]],
     *,
     band: tuple[float, float] = (0.1, 0.4),
     keep_if: str = "after_fm",
@@ -900,7 +914,7 @@ def process_step4_across_stations(
     stations = [f"st{i}" for i in range(1, 7)]
     out: dict[str, list[tuple[pd.Timestamp, int]]] = {}
     for st in stations:
-        pairs_in = pairs_by_station_step3.get(st, [])
+        pairs_in = pairs_by_station.get(st, [])
         out[st] = process_station_filter4_isr(
             base_path=base_path,
             station=st,
@@ -918,11 +932,606 @@ def process_step4_across_stations(
     return out
 
 
+# =============================================================================
+# RETURN MAPS / ANISOTROPY — density plots by start zone
+# =============================================================================
+
+# --- Geometry: Lumley triangle vertices (barycentric map) ---
+_L_A = np.array([0.0, 0.0])                   # 2C corner
+_L_C = np.array([0.5, np.sqrt(3)/2])          # 3C corner
+_L_E = np.array([1.0, 0.0])                   # 1C corner
+_L_H = float(np.sqrt(3)/2)
+
+def _points_in_triangle(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """
+    Vectorized point-in-triangle (A–C–E), inclusive borders.
+    """
+    x1, y1 = _L_A; x2, y2 = _L_C; x3, y3 = _L_E
+    c1 = (x2 - x1)*(y - y1) - (y2 - y1)*(x - x1)
+    c2 = (x3 - x2)*(y - y2) - (y3 - y2)*(x - x2)
+    c3 = (x1 - x3)*(y - y3) - (y1 - y3)*(x - x3)
+    return ((c1 <= 0) & (c2 <= 0) & (c3 <= 0)) | ((c1 >= 0) & (c2 >= 0) & (c3 >= 0))
+
+def _subtriangles(state: str, perc: float = 0.7) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Build the two asymptotic sub-triangles for a given corner ('1c','2c','3c').
+    `perc` (0..1) controls how deep into the main triangle they extend.
+    """
+    bary = np.array([0.5, np.sqrt(3)/6])  # centroid of base segment
+    A, C, E = _L_A, _L_C, _L_E
+    B = np.array([0.25, np.sqrt(3)/4])     # midpoint on A–C
+    D = np.array([0.75, np.sqrt(3)/4])     # midpoint on C–E
+    F = np.array([0.5,  0.0])              # midpoint on A–E
+
+    if state == "1c":
+        bary2 = np.array([1 - bary[0]*perc, bary[1]*perc])
+        t1 = np.array([E, np.array([1 - B[0]*perc, D[1]*perc]), bary2])
+        t2 = np.array([E, F*(2 - perc), bary2])
+    elif state == "2c":
+        bary2 = bary * perc
+        t1 = np.array([A, B * perc, bary2])
+        t2 = np.array([A, F * perc, bary2])
+    elif state == "3c":
+        bary2 = np.array([bary[0], C[1] - (C[1] - bary[1]) * perc])
+        t1 = np.array([C, B * (2 - perc), bary2])
+        t2 = np.array([C, np.array([1 - B[0]*(2 - perc), D[1]*(2 - perc)]), bary2])
+    else:
+        raise ValueError("state must be '1c','2c','3c'")
+    return t1, t2
+
+def _inside_strict(pt: Tuple[float,float], tri: np.ndarray) -> bool:
+    """
+    Strict (non-border) point-in-triangle for classification.
+    """
+    x, y = pt
+    (x1,y1),(x2,y2),(x3,y3) = tri
+    c1 = (x2 - x1)*(y - y1) - (y2 - y1)*(x - x1)
+    c2 = (x3 - x2)*(y - y2) - (y3 - y2)*(x - x2)
+    c3 = (x1 - x3)*(y - y3) - (y1 - y3)*(x - x3)
+    return (c1 < 0 and c2 < 0 and c3 < 0) or (c1 > 0 and c2 > 0 and c3 > 0)
+
+def _start_zone(x0: float, y0: float, perc: float = 0.7, h_ratio: float = 0.2) -> Optional[str]:
+    """
+    Classify the starting point (first frequency) into:
+      '1c', '2c', or '2c_axi' (bottom rectangular belt).
+    Returns None if it falls in none of these zones.
+    """
+    t1, t2 = _subtriangles('1c', perc)
+    if _inside_strict((x0,y0), t1) or _inside_strict((x0,y0), t2):
+        return '1c'
+    t1, t2 = _subtriangles('2c', perc)
+    if _inside_strict((x0,y0), t1) or _inside_strict((x0,y0), t2):
+        return '2c'
+    if (0.0 <= x0 <= 1.0) and (0.0 <= y0 <= h_ratio*_L_H):
+        return '2c_axi'
+    return None
+
+def plot_barycentric_triangle(ax: plt.Axes, *, perc: float = 0.7, fill_zones: bool = True, show_labels: bool = True) -> None:
+    """
+    Draw the Lumley (barycentric) triangle and optionally shade the three start zones.
+    """
+    ax.plot([_L_A[0], _L_C[0], _L_E[0], _L_A[0]],
+            [_L_A[1], _L_C[1], _L_E[1], _L_A[1]], color="k", lw=1)
+    ax.scatter(9/22, 9/22  * 3**0.5, color="red", s=30)
+
+    if fill_zones:
+        # 1C (rose), 2C (light blue), 3C (light green)
+        for st, color in (("1c", "#ffd4d4"), ("2c", "#d4e8ff"), ("3c", "#d7f7d7")):
+            t1, t2 = _subtriangles(st, perc)
+            ax.fill(*zip(*t1), color=color, alpha=0.35, lw=0)
+            ax.fill(*zip(*t2), color=color, alpha=0.35, lw=0)
+
+        # bottom belt (axi) in grey
+        ax.fill([0,1,1,0], [0,0,_L_H*0.2,_L_H*0.2], color="#e9e9e9", alpha=0.35, lw=0)
+
+    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, _L_H+0.02)
+    ax.set_xticks([]); ax.set_yticks([])
+    if show_labels:
+        ax.text(_L_E[0], _L_E[1]-0.03, "1C", ha="center", va="top")
+        ax.text(_L_A[0], _L_A[1]-0.03, "2C", ha="center", va="top")
+        ax.text(_L_C[0], _L_C[1]+0.03, "3C", ha="center", va="bottom")
+
+
+# ---------------- core collectors ----------------
+
+def gather_anisotropy_tracks_for_station(
+    base_path: str | Path,
+    station: str,
+    pairs: List[Tuple[pd.Timestamp, int]],
+    *,
+    fmax: float = 5.0,
+    require_inside: bool = True,
+) -> Dict[str, Dict[str, List[np.ndarray]]]:
+    """
+    Collect anisotropy tracks (xb, yb vs freq_cutoff) for the given (time,height)
+    pairs of a station. Tracks are grouped by the START zone of the path:
+    '1c', '2c', '2c_axi'. Optionally keep only tracks fully inside the triangle.
+
+    Returns
+    -------
+    dict
+      {
+        '1c':     {'X': [x_arr,...], 'Y': [y_arr,...], 'F': [f_arr,...]},
+        '2c':     {'X': [...],       'Y': [...],       'F': [...]},
+        '2c_axi': {'X': [...],       'Y': [...],       'F': [...]}
+      }
+    """
+    buckets = {
+        '1c': {'X': [], 'Y': [], 'F': []},
+        '2c': {'X': [], 'Y': [], 'F': []},
+        '2c_axi': {'X': [], 'Y': [], 'F': []},
+    }
+
+    if not pairs:
+        return buckets
+
+    file_paths = list_station_files(base_path, station, pattern="*_10min.pkl")
+
+    # per-file membership by time
+    for fp in file_paths:
+        try:
+            d = load_daily_ds(fp)
+        except Exception:
+            continue
+
+        ani = d.get("anisotropy_smooth")
+        if ani is None or "time" not in ani or "heights" not in ani:
+            continue
+
+        times = ani["time"].values.astype("datetime64[ns]")
+        heights = ani["heights"].values.astype(int)
+        time_set = set(times)
+
+        # keep only pairs present in this file
+        pairs_here = []
+        for t, h in pairs:
+            t64 = np.datetime64(pd.to_datetime(t), "ns")
+            if t64 in time_set and int(h) in heights:
+                pairs_here.append((t64, int(h)))
+        if not pairs_here:
+            continue
+
+        for t64, h in pairs_here:
+            try:
+                ds_sel = ani.sel(time=t64, heights=h, method="nearest")
+                xb = np.asarray(ds_sel["xb"].values)
+                yb = np.asarray(ds_sel["yb"].values)
+                f  = np.asarray(ds_sel["freq_cutoff"].values, dtype=float)
+            except Exception:
+                continue
+
+            if xb.size == 0 or yb.size == 0 or f.size == 0:
+                continue
+
+            # valid & <= fmax
+            m = np.isfinite(f) & (f <= float(fmax))
+            if not np.any(m):
+                continue
+
+            x_sub = xb[m]; y_sub = yb[m]; f_sub = f[m]
+
+            # sort by frequency (robust, ensures monotonic grid downstream)
+            order = np.argsort(f_sub)
+            f_sub = f_sub[order]; x_sub = x_sub[order]; y_sub = y_sub[order]
+
+            if require_inside and not np.all(_points_in_triangle(x_sub, y_sub)):
+                continue
+
+            zone = _start_zone(float(x_sub[0]), float(y_sub[0]))
+            if zone is None:
+                continue
+
+            buckets[zone]['X'].append(x_sub)
+            buckets[zone]['Y'].append(y_sub)
+            buckets[zone]['F'].append(f_sub)
+
+    return buckets
+
+
+def plot_return_map_density_for_station(
+    base_path: str | Path,
+    station: str,
+    pairs: List[Tuple[pd.Timestamp, int]],
+    *,
+    fmax: float = 5.0,
+    perc: float = 0.7,
+    h_ratio: float = 0.2,
+    require_inside: bool = True,
+    gridsize: int = 70,
+    cmap: str = "Greys",
+) -> None:
+    """
+    For a single station, draw three side-by-side hexbin densities on the Lumley
+    triangle for tracks grouped by START zone: '1c', '2c', '2c_axi'.
+    """
+    buckets = gather_anisotropy_tracks_for_station(
+        base_path, station, pairs, fmax=fmax, require_inside=require_inside
+    )
+
+    titles = {'1c': 'Start: 1C (lower-right)',
+              '2c': 'Start: 2C (lower-left)',
+              '2c_axi': f'Start: low belt (h≤{h_ratio}·H)'}
+    order = ['1c', '2c', '2c_axi']
+
+    fig, axs = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
+    any_plotted = False
+    last_hb = None
+
+    for ax, key in zip(axs, order):
+        plot_barycentric_triangle(ax=ax, perc=perc, fill_zones=True)
+        if buckets[key]['X']:
+            all_x = np.concatenate(buckets[key]['X'])
+            all_y = np.concatenate(buckets[key]['Y'])
+            hb = ax.hexbin(all_x, all_y, gridsize=gridsize, cmap=cmap,
+                           bins='log', mincnt=1, linewidths=0.0)
+            ax.set_title(f"{station} — {titles[key]}  |  n={len(buckets[key]['X'])}")
+            last_hb = hb
+            any_plotted = True
+        else:
+            ax.set_title(f"{station} — {titles[key]}  |  n=0")
+
+    if not any_plotted:
+        print(f"{station}: no valid tracks with current criteria.")
+        plt.close(fig)
+        return
+
+    if last_hb is not None:
+        cbar = fig.colorbar(last_hb, ax=axs, shrink=0.9)
+        cbar.set_label("log(count)")
+
+    plt.show()
+
+def plot_return_maps_all_stations(
+    base_path: str | Path,
+    pairs_by_station: Dict[str, List[Tuple[pd.Timestamp, int]]],
+    *,
+    fmax: float = 5.0,
+    perc: float = 0.7,
+    h_ratio: float = 0.2,
+    require_inside: bool = True,
+    gridsize: int = 70,
+    cmap: str = "Greys",
+) -> None:
+    """
+    Loop over stations ('st1'..'st6') and produce one 3-panel density figure per station.
+    """
+    stations = [f"st{i}" for i in range(1, 7)]
+    for st in stations:
+        pairs = pairs_by_station.get(st, [])
+        plot_return_map_density_for_station(
+            base_path=base_path,
+            station=st,
+            pairs=pairs,
+            fmax=fmax,
+            perc=perc,
+            h_ratio=h_ratio,
+            require_inside=require_inside,
+            gridsize=gridsize,
+            cmap=cmap,
+        )
 
 
 
 
+def _compute_median_track(
+    Xs: List[np.ndarray], Ys: List[np.ndarray], Fs: List[np.ndarray], *,
+    fmax: float, grid_choice: str = "mode_len"
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | Tuple[None, None, None]:
+    """
+    Build a common frequency grid and compute the median track:
+        x_med(f) = median_i x_i(f),  y_med(f) = median_i y_i(f).
+    Each track (Xi,Yi) is linearly interpolated on the common grid.
+    Grid strategy:
+      - "mode_len": use the frequency vector of the most common length among tracks.
+    Returns (f_ref, x_med, y_med); (None, None, None) if not enough data.
+    """
+    if not Xs:
+        return None, None, None
 
+    # choose a reference grid by most-common length
+    lengths = [len(f) for f in Fs]
+    mode_len = max(set(lengths), key=lengths.count)
+    idx_ref = next(i for i, L in enumerate(lengths) if L == mode_len)
+    f_ref = np.asarray(Fs[idx_ref], float)
+    f_ref = f_ref[np.isfinite(f_ref) & (f_ref <= float(fmax))]
+    if f_ref.size < 2:
+        return None, None, None
+
+    Xmat = np.full((len(Xs), f_ref.size), np.nan)
+    Ymat = np.full((len(Ys), f_ref.size), np.nan)
+
+    for i, (x, y, f) in enumerate(zip(Xs, Ys, Fs)):
+        f = np.asarray(f, float)
+        m = np.isfinite(f) & (f <= float(fmax))
+        if np.count_nonzero(m) < 2:
+            continue
+        f_i = f[m]; x_i = np.asarray(x, float)[m]; y_i = np.asarray(y, float)[m]
+        o = np.argsort(f_i); f_i, x_i, y_i = f_i[o], x_i[o], y_i[o]
+        valid = (f_ref >= f_i[0]) & (f_ref <= f_i[-1])
+        if np.count_nonzero(valid) == 0:
+            continue
+        Xmat[i, valid] = np.interp(f_ref[valid], f_i, x_i)
+        Ymat[i, valid] = np.interp(f_ref[valid], f_i, y_i)
+
+    if np.all(np.isnan(Xmat)) or np.all(np.isnan(Ymat)):
+        return None, None, None
+
+    x_med = np.nanmedian(Xmat, axis=0)
+    y_med = np.nanmedian(Ymat, axis=0)
+    return f_ref, x_med, y_med
+
+
+from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize
+
+def _plot_gradient_path(ax, x, y, f, *, cmap="viridis", lw=2.0, zorder=2, show_cbar=False):
+    """
+    Plot a polyline (x,y) colored by the parameter f with a colormap.
+    Returns the LineCollection (and optional colorbar if requested).
+    """
+    x = np.asarray(x, float); y = np.asarray(y, float); f = np.asarray(f, float)
+    ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(f)
+    x, y, f = x[ok], y[ok], f[ok]
+    if x.size < 2:
+        return None, None
+
+    pts = np.column_stack([x, y])
+    segs = np.stack([pts[:-1], pts[1:]], axis=1)
+
+    norm = Normalize(vmin=f.min(), vmax=f.max())
+    lc = LineCollection(segs, cmap=cmap, norm=norm)
+    # use segment mid-frequency to color each segment
+    f_mid = 0.5 * (f[:-1] + f[1:])
+    lc.set_array(f_mid)
+    lc.set_linewidth(lw)
+    lc.set_zorder(zorder)
+    ax.add_collection(lc)
+
+    cbar = None
+    if show_cbar:
+        cbar = plt.colorbar(lc, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("Frequency [Hz]")
+
+    return lc, cbar
+
+
+def _overlay_micro_segment(ax, x, y, f, micro_band, *, color="red", lw=3.0, zorder=3):
+    """
+    Draw only the segments whose BOTH endpoints fall inside micro_band.
+    """
+    x = np.asarray(x, float); y = np.asarray(y, float); f = np.asarray(f, float)
+    ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(f)
+    x, y, f = x[ok], y[ok], f[ok]
+    if x.size < 2:
+        return
+
+    pts = np.column_stack([x, y])
+    # segments to draw = indices i where (f[i], f[i+1]) both in band
+    m = (f >= micro_band[0]) & (f <= micro_band[1])
+    seg_idx = np.where(m[:-1] & m[1:])[0]
+    if seg_idx.size == 0:
+        return
+    segs = np.stack([pts[seg_idx], pts[seg_idx + 1]], axis=1)
+    lc = LineCollection(segs, colors=color, linewidths=lw, zorder=zorder)
+    ax.add_collection(lc)
+
+
+def plot_return_map_density_with_median(
+    base_path: str | Path,
+    station: str,
+    pairs: List[Tuple[pd.Timestamp, int]],
+    *,
+    fmax: float = 5.0,
+    perc: float = 0.7,
+    h_ratio: float = 0.2,
+    require_inside: bool = True,
+    gridsize: int = 70,
+    cmap_bg: str = "Greys",
+    micro_band: Tuple[float, float] = (0.1, 0.4),
+    show_hexbin: bool = True,
+    show_cbar: bool = False,        # set True per mostrare la colorbar delle frequenze
+    cmap_curve: str = "viridis",    # curva mediana: scuro→chiaro (basse→alte f)
+    lw_curve: float = 2.0,
+    lw_micro: float = 3.0,
+) -> None:
+    """
+    Hexbin density + median track per start-zone. The median track is drawn with a
+    frequency-colored gradient (viridis by default), and the microbarom portion is
+    over-plotted in solid red.
+
+    - Background: optional hexbin of all points in the bucket.
+    - Curve: median(x(f)), median(y(f)) over a common frequency grid.
+             Colored by frequency to show direction (low f = scuro → high f = chiaro).
+    - Micro band: the same median curve, limited to micro_band, in red.
+    """
+    buckets = gather_anisotropy_tracks_for_station(
+        base_path, station, pairs, fmax=fmax, require_inside=require_inside
+    )
+
+    titles = {'1c': 'Start: 1C (lower-right)',
+              '2c': 'Start: 2C (lower-left)',
+              '2c_axi': f'Start: low belt (h≤{h_ratio}·H)'}
+    order = ['1c', '2c', '2c_axi']
+
+    fig, axs = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
+    any_plotted = False
+    last_hb = None
+
+    for ax, key in zip(axs, order):
+        plot_barycentric_triangle(ax=ax, perc=perc, fill_zones=True)
+
+        B = buckets.get(key, {'X': [], 'Y': [], 'F': []})
+        Xs, Ys, Fs = B.get('X', []), B.get('Y', []), B.get('F', [])
+        if not Xs:
+            ax.set_title(f"{station} — {titles[key]}  |  n=0")
+            continue
+
+        if show_hexbin:
+            all_x = np.concatenate(Xs); all_y = np.concatenate(Ys)
+            hb = ax.hexbin(all_x, all_y, gridsize=gridsize, cmap=cmap_bg,
+                           bins='log', mincnt=1, linewidths=0.0)
+            last_hb = hb
+
+        # median track on a common frequency grid
+        f_ref, x_med, y_med = _compute_median_track(Xs, Ys, Fs, fmax=fmax)
+        if f_ref is None:
+            ax.set_title(f"{station} — {titles[key]}  |  n={len(Xs)} (no median)")
+            continue
+
+        ok = np.isfinite(f_ref) & np.isfinite(x_med) & np.isfinite(y_med)
+        f_ref, x_med, y_med = f_ref[ok], x_med[ok], y_med[ok]
+        if f_ref.size < 2:
+            ax.set_title(f"{station} — {titles[key]}  |  n={len(Xs)} (short)")
+            continue
+
+        # 1) gradient curve by frequency (direction cue)
+        _plot_gradient_path(ax, x_med, y_med, f_ref,
+                            cmap=cmap_curve, lw=lw_curve, zorder=3, show_cbar=show_cbar)
+
+        # 2) micro-band segment in red
+        _overlay_micro_segment(ax, x_med, y_med, f_ref, micro_band,
+                               color='red', lw=lw_micro, zorder=4)
+
+    
+        ax.set_title(f"{station} — {titles[key]}  |  n={len(Xs)}")
+        any_plotted = True
+
+    if not any_plotted:
+        print(f"{station}: no valid tracks with current criteria.")
+        plt.close(fig); return
+
+    if show_hexbin and last_hb is not None:
+        cbar = fig.colorbar(last_hb, ax=axs, shrink=0.9)
+        cbar.set_label("log(count)")
+
+    plt.show()
+
+
+
+def plot_return_map_density_with_median_cumulative(
+    base_path: str | Path,
+    pairs_by_station: Dict[str, List[Tuple[pd.Timestamp, int]]],
+    *,
+    fmax: float = 5.0,
+    perc: float = 0.7,
+    h_ratio: float = 0.2,     # kept for title consistency
+    require_inside: bool = True,
+    gridsize: int = 70,
+    cmap_bg: str = "Greys",
+    micro_band: Tuple[float, float] = (0.1, 0.4),
+    show_hexbin: bool = True,
+    show_cbar: bool = False,
+    cmap_curve: str = "viridis",
+    lw_curve: float = 2.0,
+    lw_micro: float = 3.0,
+) -> None:
+    """
+    CUMULATIVE return-map view across ALL stations.
+    Everything is overlaid on the same three panels (1C, 2C, 2C_axi).
+
+    Steps
+    -----
+    1) For each station, gather barycentric tracks (X,Y,F) for the given pairs.
+    2) Aggregate all stations together per panel-key ('1c','2c','2c_axi').
+    3) Plot a single hexbin background (optional) using all points from all stations.
+    4) Compute a single global median track per panel over a common frequency grid.
+    5) Overlay the micro-band segment of the median in solid red.
+
+    Notes
+    -----
+    - Requires the helpers:
+        gather_anisotropy_tracks_for_station(...)
+        _compute_median_track(...)
+        _plot_gradient_path(...)
+        _overlay_micro_segment(...)
+        plot_barycentric_triangle(...)
+    - Median is computed across ALL tracks pooled together for that panel.
+    """
+    # 1) gather and 2) aggregate across stations
+    agg = {k: {"X": [], "Y": [], "F": []} for k in ["1c", "2c", "2c_axi"]}
+
+    total_tracks = {k: 0 for k in agg.keys()}
+    for st, pairs in pairs_by_station.items():
+        if not pairs:
+            continue
+        buckets = gather_anisotropy_tracks_for_station(
+            base_path, st, pairs, fmax=fmax, require_inside=require_inside
+        )
+        for key in agg.keys():
+            Xs, Ys, Fs = buckets.get(key, {}).get("X", []), buckets.get(key, {}).get("Y", []), buckets.get(key, {}).get("F", [])
+            if Xs:
+                agg[key]["X"].extend(Xs)
+                agg[key]["Y"].extend(Ys)
+                agg[key]["F"].extend(Fs)
+                total_tracks[key] += len(Xs)
+
+    titles = {
+        "1c": "Start: 1C (lower-right)",
+        "2c": "Start: 2C (lower-left)",
+        "2c_axi": f"Start: low belt (h≤{h_ratio}·H)"
+    }
+    order = ["1c", "2c", "2c_axi"]
+
+    fig, axs = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
+    last_hb = None
+    anything = False
+
+    for ax, key in zip(axs, order):
+        plot_barycentric_triangle(ax=ax, perc=perc, fill_zones=True)
+
+        Xs, Ys, Fs = agg[key]["X"], agg[key]["Y"], agg[key]["F"]
+        n_tracks = total_tracks[key]
+        if n_tracks == 0:
+            ax.set_title(f"{titles[key]}  |  n=0")
+            continue
+
+        # 3) global hexbin background
+        if show_hexbin:
+            all_x = np.concatenate(Xs)
+            all_y = np.concatenate(Ys)
+            hb = ax.hexbin(
+                all_x, all_y,
+                gridsize=gridsize, cmap=cmap_bg,
+                bins="log", mincnt=1, linewidths=0.0
+            )
+            last_hb = hb
+
+        # 4) global median track on a common frequency grid
+        f_ref, x_med, y_med = _compute_median_track(Xs, Ys, Fs, fmax=fmax)
+        if f_ref is not None:
+            ok = np.isfinite(f_ref) & np.isfinite(x_med) & np.isfinite(y_med)
+            f_ref, x_med, y_med = f_ref[ok], x_med[ok], y_med[ok]
+        if (f_ref is None) or (f_ref.size < 2):
+            ax.set_title(f"{titles[key]}  |  n={n_tracks} (no median)")
+            continue
+
+        # gradient median curve (frequency-colored)
+        _plot_gradient_path(
+            ax, x_med, y_med, f_ref,
+            cmap=cmap_curve, lw=lw_curve, zorder=3, show_cbar=False
+        )
+
+        # 5) microband segment in red
+        _overlay_micro_segment(
+            ax, x_med, y_med, f_ref, micro_band,
+            color="red", lw=lw_micro, zorder=4
+        )
+
+        ax.set_title(f"{titles[key]}  |  n={n_tracks}")
+        anything = True
+
+    if not anything:
+        print("No valid tracks to display with current criteria.")
+        plt.close(fig)
+        return
+
+    if show_hexbin and show_cbar and last_hb is not None:
+        cbar = fig.colorbar(last_hb, ax=axs, shrink=0.9)
+        cbar.set_label("log(count)")
+
+    plt.show()
 
 
 # =========================
@@ -979,8 +1588,8 @@ def _pick_random_pairs_across_stations(pairs_by_station: Dict[str, List[Tuple[pd
     idx = rng.choice(len(all_pairs), size=min(k, len(all_pairs)), replace=False)
     return [all_pairs[i] for i in idx]
 
-def plot_random_pressure_spectra_from_step2(
-    pairs_step2_by_station: Dict[str, List[Tuple[pd.Timestamp, int]]],
+def plot_random_pressure_spectra(
+    pairs_by_station: Dict[str, List[Tuple[pd.Timestamp, int]]],
     base_path: str,
     *,
     k: int = 6,
@@ -1010,13 +1619,13 @@ def plot_random_pressure_spectra_from_step2(
     # Build file lists per station
     files_by_station = {
         st: sorted(glob(os.path.join(base_path, st, "*.pkl")))
-        for st in pairs_step2_by_station.keys()
+        for st in pairs_by_station.keys()
     }
     # Build per-station date maps for fast file lookup
     date_map_by_station = {st: _build_date_map(fps) for st, fps in files_by_station.items()}
 
     # Randomly select pairs
-    picks = _pick_random_pairs_across_stations(pairs_step2_by_station, k=k, seed=seed)
+    picks = _pick_random_pairs_across_stations(pairs_by_station, k=k, seed=seed)
     if not picks:
         print("No Step-2 pairs available to plot.")
         return
@@ -1070,8 +1679,8 @@ def plot_random_pressure_spectra_from_step2(
 
 
 
-def plot_random_pressure_spectra_from_step3(
-    pairs_step2_by_station: Dict[str, List[Tuple[pd.Timestamp, int]]],
+def plot_random_coherence(
+    pairs_by_station: Dict[str, List[Tuple[pd.Timestamp, int]]],
     base_path: str,
     *,
     k: int = 6,
@@ -1108,13 +1717,13 @@ def plot_random_pressure_spectra_from_step3(
     # Build file lists per station (same structure)
     files_by_station = {
         st: sorted(glob(os.path.join(base_path, st, "*.pkl")))
-        for st in pairs_step2_by_station.keys()
+        for st in pairs_by_station.keys()
     }
     # Per-station date maps for fast lookup (same helper)
     date_map_by_station = {st: _build_date_map(fps) for st, fps in files_by_station.items()}
 
     # Randomly select pairs (same helper)
-    picks = _pick_random_pairs_across_stations(pairs_step2_by_station, k=k, seed=seed)
+    picks = _pick_random_pairs_across_stations(pairs_by_station, k=k, seed=seed)
     if not picks:
         print("No Step-2 pairs available to plot.")
         return
@@ -1208,8 +1817,8 @@ def plot_random_pressure_spectra_from_step3(
         plt.tight_layout()
         plt.show()
 
-def plot_random_kaimal_from_step4(
-    pairs_step4_by_station: Dict[str, List[Tuple[pd.Timestamp, int]]],
+def plot_random_kaimal(
+    pairs_by_station: Dict[str, List[Tuple[pd.Timestamp, int]]],
     base_path: str,
     *,
     k: int = 6,
@@ -1232,11 +1841,11 @@ def plot_random_kaimal_from_step4(
     # Build file lists per station (same structure as your Step-3 plotter)
     files_by_station = {
         st: sorted(glob(os.path.join(base_path, st, "*.pkl")))
-        for st in pairs_step4_by_station.keys()
+        for st in pairs_by_station.keys()
     }
     date_map_by_station = {st: _build_date_map(fps) for st, fps in files_by_station.items()}
 
-    picks = _pick_random_pairs_across_stations(pairs_step4_by_station, k=k, seed=seed)
+    picks = _pick_random_pairs_across_stations(pairs_by_station, k=k, seed=seed)
     if not picks:
         print("No Step-3 pairs available to plot.")
         return

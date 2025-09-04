@@ -22,7 +22,8 @@ from scales import stationarity
 from spectral_analysis import spectra_eps, coherence_from_spectra
 from autocorrelation import autocorrelation
 from microbarom import get_microbarom
-from ogive import compute_ogive
+from ogive import compute_ogive, band_ogives_logspace
+
 from anisotropy import anisotropy_barycentric_ds
 """
 from metutils import N2
@@ -139,12 +140,14 @@ def process(ds, config):
         #ogive_raw = compute_ogive(raw_spectra, n_points=6000)
         #ogive_ds2 = compute_ogive(results["binned_spectra"])
         ogive_smooth = compute_ogive(spectra, n_points=6000)
+        ogive_band = band_ogives_logspace(spectra, n_points=6000)
         #results["ogive_raw"] = ogive_ds1
         #results["ogive_binned"] = ogive_ds2
         #results["ogive"] = ogive_ds3
         
         #results["anisotropy_raw"] = anisotropy_barycentric_ds(ogive_raw)
         results["anisotropy_smooth"] = anisotropy_barycentric_ds(ogive_smooth)
+        results["anisotropy_band"] = anisotropy_barycentric_ds(ogive_band)
 
     """
     # structure functions
@@ -164,7 +167,7 @@ def process(ds, config):
 
 
 
-station = 'st6'
+station = 'st1'
 
 # Load configuration file
 config_path = '/Users/mauro_ghirardelli/Documents/windpy4/conf/config_10min.txt'

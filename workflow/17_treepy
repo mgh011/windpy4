@@ -1,22 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import sys
-import os
-import pickle
-from glob import glob
-from pathlib import Path
-from typing import List, Tuple, Dict, Optional
 
-import numpy as np
 import pandas as pd
-import xarray as xr
-import matplotlib.pyplot as plt
+
 import json
 
 sys.path.append('/Users/mauro_ghirardelli/Documents/windpy4/src')
-from workflow import process_station_qc_step1, process_step2_across_stations, process_step3_across_stations, process_step4_across_stations
-from workflow import plot_random_pressure_spectra_from_step2, plot_random_pressure_spectra_from_step3, plot_random_kaimal_from_step4
-
+from workflow import process_station_qc_step1, filter_MB_across_stations, process_coherence_across_stations, process_ISR_across_stations
+from workflow import plot_random_pressure_spectra, plot_random_coherence, plot_random_kaimal, plot_return_maps_all_stations, plot_return_map_density_with_median, plot_return_map_density_with_median_cumulative
 
 # Load config (expects a JSON with a key "path" pointing to the folder that contains st1..st6)
 config_path = "/Users/mauro_ghirardelli/Documents/windpy4/conf/config_10min.txt"
@@ -29,10 +21,10 @@ base_path = config["path"]  # e.g., "/.../windpy4/data/"
 # QC FILTERING
 # =========================
 # 1) Step 1: get pairs per station
-pairs_step1_by_station = {}
+pairs_QC = {}
 for i in range(1, 7):
     st = f"st{i}"
-    pairs_step1_by_station[st] = process_station_qc_step1(
+    pairs_QC[st] = process_station_qc_step1(
         base_path=base_path,
         station=st,
         qc_threshold=0.05,
@@ -44,9 +36,9 @@ for i in range(1, 7):
 # MB FILTERING
 # =========================
 # 2) Step 2: robust-MB filter across ALL stations (global stats)
-pairs_step2_by_station = process_step2_across_stations(
+pairs_MB_by_station = filter_MB_across_stations(
     base_path=base_path,
-    pairs_by_station=pairs_step1_by_station,
+    pairs_by_station=pairs_QC,
     tau_z=3.0,           # <- your threshold
     direction="above",   # "above" (high MB), "below" (low MB), or "abs"
     plot=True,           # plot filtered points per station
@@ -56,8 +48,8 @@ pairs_step2_by_station = process_step2_across_stations(
 
 
 # After you already computed pairs_step2_by_station = process_step2_across_stations(...)
-plot_random_pressure_spectra_from_step2(
-    pairs_step2_by_station=pairs_step2_by_station,
+plot_random_pressure_spectra(
+    pairs_by_station=pairs_MB_by_station,
     base_path=base_path,
     k=9,
     seed=2,
@@ -68,22 +60,22 @@ plot_random_pressure_spectra_from_step2(
 # COHERENCE FILTERING
 # =========================
 # STEP 3 su tutte le stazioni, partendo dai pairs dello Step 2
-pairs_step3_by_station = process_step3_across_stations(
+pairs_COH_by_station = process_coherence_across_stations(
     base_path=base_path,
-    pairs_by_station_step2=pairs_step2_by_station,  # output del tuo Step 2
+    pairs_by_station=pairs_MB_by_station,  # output del tuo Step 2
     band=(0.1, 0.4),
     win=0.03,
-    thr=0.40,
+    thr=0.30,
     mode="any",    # or "both", "u_only", "w_only"
     plot=True
 )
 
 
 # After you already computed pairs_step2_by_station = process_step2_across_stations(...)
-plot_random_pressure_spectra_from_step3(
-    pairs_step2_by_station=pairs_step3_by_station,
+plot_random_coherence(
+    pairs_by_station=pairs_MB_by_station,
     base_path=base_path,
-    k=9,
+    k=4,
     seed=2,
     fband=(0.1, 0.4),
 )
@@ -91,9 +83,9 @@ plot_random_pressure_spectra_from_step3(
 # =========================
 # ISR FILTERING
 # =========================
-pairs_step4_by_station = process_step4_across_stations(
+pairs_ISR_by_station = process_ISR_across_stations(
     base_path=base_path,
-    pairs_by_station_step3=pairs_step3_by_station,
+    pairs_by_station=pairs_COH_by_station,
     band=(0.1, 0.4),
     keep_if="after_fm",                 # “picco dopo fm” ⇒ in ISR
     require_fm_below_bandmin=True,      # opzionale: pretendi fm ≤ 0.1 Hz
@@ -101,9 +93,9 @@ pairs_step4_by_station = process_step4_across_stations(
     U_var="meanU",
     c0=0.164/3.8, cm=0.164              # come nel tuo snippet (fm = 4·f0)
 )
-#%%
-plot_random_kaimal_from_step4(
-    pairs_step4_by_station=pairs_step4_by_station,
+
+plot_random_kaimal(
+    pairs_by_station=pairs_ISR_by_station,
     base_path=base_path,
     k=4,
     seed=123,
@@ -111,4 +103,125 @@ plot_random_kaimal_from_step4(
     c_const=0.164  # fm = 0.164 * U / Lw
 )
 
+#%%
+# =========================
+# RTI FILTERING
+# =========================
+# Esempio: usa i pairs dopo lo Step 4 (ISR), ma va bene anche Step 2 o 3
+plot_return_maps_all_stations(
+    base_path=base_path,
+    pairs_by_station=pairs_ISR_by_station,  # dict: st1..st6 -> [(t,h), ...]
+    fmax=5.0,
+    perc=0.7,
+    h_ratio=0.2,
+    require_inside=True,
+    gridsize=70,
+    cmap="Greys"
+)
 
+#%%
+plot_return_map_density_with_median(
+    base_path=base_path,
+    station="st6",
+    pairs=pairs_ISR_by_station["st6"],
+    fmax=5.0,
+    micro_band=(0.1, 0.4),
+    show_hexbin=True,
+    show_cbar=False,       # True se vuoi anche la colorbar delle frequenze
+    cmap_curve="viridis",  # scuro→chiaro
+    lw_curve=2.0,
+    lw_micro=3.0
+)
+
+#%%
+
+plot_return_map_density_with_median(
+    base_path=base_path,
+    station="st6",
+    pairs=pairs_ISR_by_station["st6"],
+    fmax=5.0,
+    micro_band=(0.1, 0.4),
+    show_hexbin=True,
+    show_cbar=False,       # True se vuoi anche la colorbar delle frequenze
+    cmap_curve="viridis",  # scuro→chiaro
+    lw_curve=2.0,
+    lw_micro=3.0
+)
+
+#%%
+
+plot_return_map_density_with_median_cumulative(
+    base_path=base_path,
+    pairs_by_station=pairs_ISR_by_station,  # or step1/step2 dicts
+    fmax=5.0,
+    perc=0.7,
+    h_ratio=0.2,
+    require_inside=True,
+    gridsize=70,
+    cmap_bg="Greys",
+    micro_band=(0.1, 0.4),
+    show_hexbin=True,
+    show_cbar=False,
+    cmap_curve="viridis",
+    lw_curve=2.0,
+    lw_micro=3.0,
+)
+
+#%%
+from typing import Dict, List, Tuple
+import pandas as pd
+
+PairDict = Dict[str, List[Tuple[pd.Timestamp, int]]]
+
+def make_excluded_dict(
+    pairs_step3_by_station: PairDict,
+    pairs_step4_by_station: PairDict,
+) -> PairDict:
+    """
+    Return, for each station, the pairs present after Step 3 but missing after Step 4.
+
+    Notes
+    -----
+    - Normalizes timestamps with pandas.to_datetime and heights to int.
+    - Removes duplicates and sorts by (time, height).
+    """
+    out: PairDict = {}
+    stations = set(pairs_step3_by_station.keys()) | set(pairs_step4_by_station.keys())
+    for st in sorted(stations):
+        s3 = {(pd.to_datetime(t), int(h)) for (t, h) in pairs_step3_by_station.get(st, [])}
+        s4 = {(pd.to_datetime(t), int(h)) for (t, h) in pairs_step4_by_station.get(st, [])}
+        excl = sorted(s3 - s4, key=lambda x: (x[0], x[1]))
+        out[st] = excl
+    return out
+
+excluded_by_station = make_excluded_dict(pairs_COH_by_station, pairs_ISR_by_station)
+#%%
+excluded_by_station_MB = make_excluded_dict(pairs_step1_by_station, pairs_step2_by_station)
+# e.g. excluded_by_station['st6'] -> lista di (Timestamp, height) esclusi
+#%%
+pair_without_MB_ISR = process_step4_across_stations(
+    base_path=base_path,
+    pairs_by_station_step3=excluded_by_station_MB,
+    band=(0.1, 0.4),
+    keep_if="after_fm",                 # “picco dopo fm” ⇒ in ISR
+    require_fm_below_bandmin=True,      # opzionale: pretendi fm ≤ 0.1 Hz
+    Lw_var="intlenW",
+    U_var="meanU",
+    c0=0.164/3.8, cm=0.164              # come nel tuo snippet (fm = 4·f0)
+)
+
+
+#%%
+plot_return_map_density_with_median(
+    base_path=base_path,
+    station="st6",
+    pairs=pair_without_MB_ISR["st6"],
+    fmax=5.0,
+    micro_band=(0.1, 0.4),
+    show_hexbin=True,
+    show_cbar=False,       # True se vuoi anche la colorbar delle frequenze
+    cmap_curve="viridis",  # scuro→chiaro
+    lw_curve=2.0,
+    lw_micro=3.0
+)
+#%%

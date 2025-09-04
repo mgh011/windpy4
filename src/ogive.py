@@ -154,3 +154,85 @@ def downsample_ogive_log(ds_ogive: xr.Dataset, n_points: int = 3000, cast_float3
     coords["freq_cutoff"] = ("freq_cutoff", f_tgt.astype(np.float32) if cast_float32 else f_tgt)
     return xr.Dataset(out_vars, coords=coords)
 
+
+
+def band_ogives_logspace(spectra, fmin=None, fmax=5.0, n_points=2000):
+    """
+    Crea un nuovo Dataset con 'ogive a banda' in log-space.
+    - La larghezza della banda è fissata a quella di [0.1, 0.4] Hz in scala log.
+    - Le bande sono contigue e coprono [fmin, fmax].
+    
+    Parametri
+    ---------
+    spectra : xr.Dataset
+        Deve contenere variabili spettrali ('su','sv','sw','cuv','cuw','cvw') 
+        con dims (time, heights, freq).
+    fmin : float, opzionale
+        Frequenza minima per la griglia log. Default = min(spectra.freq).
+    fmax : float, opzionale
+        Frequenza massima (default=5 Hz).
+    n_points : int
+        Numero di punti della griglia log di interpolazione.
+    
+    Output
+    ------
+    ds_band : xr.Dataset
+        Dataset con dims (time, heights, freq_band), 
+        coord 'freq_band' = centro banda.
+    """
+
+    # 1) griglia log target
+    f_in = spectra['freq'].values.astype(float)
+    fmin = fmin or np.nanmin(f_in)
+    fmax = min(fmax, np.nanmax(f_in))
+    flog = np.logspace(np.log10(fmin), np.log10(fmax), n_points)
+
+    # 2) interpola spettri e cospettri sulla nuova griglia
+    vars_in = ['su','sv','sw','cuv','cuw','cvw']
+    arrs = {}
+    for v in vars_in:
+        vals = spectra[v].values  # (time, heights, freq)
+        T,H,F = vals.shape
+        out = np.full((T,H,n_points), np.nan, float)
+        for ti in range(T):
+            for hi in range(H):
+                y = vals[ti,hi,:]
+                m = np.isfinite(f_in) & np.isfinite(y)
+                if m.sum()<2: 
+                    continue
+                p = PchipInterpolator(f_in[m], y[m], extrapolate=False)
+                out[ti,hi,:] = p(flog)
+        arrs[v] = out
+
+    # 3) definisci ampiezza banda in scala log
+    delta_log = np.log10(0.4) - np.log10(0.1)  # ≈0.602
+    log_edges = [np.log10(fmin)]
+    while log_edges[-1] < np.log10(fmax)-1e-9:
+        log_edges.append(log_edges[-1] + delta_log)
+    log_edges = np.array(log_edges)
+    bands = 10**np.vstack([log_edges[:-1], log_edges[1:]]).T
+    B = bands.shape[0]
+    f_centers = 10**((log_edges[:-1]+log_edges[1:])/2)
+
+    # 4) integra per banda
+    out_vars = {k: np.zeros((T,H,B)) for k in ['uu','vv','ww','uv','uw','vw']}
+    for bi,(f1,f2) in enumerate(bands):
+        mask = (flog>=f1)&(flog<=f2)
+        if not np.any(mask): continue
+        xf = flog[mask]
+        for k,v in zip(['uu','vv','ww','uv','uw','vw'], 
+                       [arrs['su'],arrs['sv'],arrs['sw'],arrs['cuv'],arrs['cuw'],arrs['cvw']]):
+            out_vars[k][:,:,bi] = np.trapz(v[:,:,mask], x=xf, axis=-1)
+
+    # 5) crea dataset
+    coords = {
+        'time': spectra.time.values,
+        'heights': spectra.heights.values,
+        'freq_band': f_centers,   # centro banda
+    }
+    ds_band = xr.Dataset(
+        {k:(('time','heights','freq_band'), out_vars[k]) for k in out_vars},
+        coords=coords
+    )
+
+    return ds_band
